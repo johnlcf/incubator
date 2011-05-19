@@ -7,6 +7,9 @@ This serves as a long usage message.
 import sys
 import getopt
 import re
+import traceback
+import logging
+from optparse import OptionParser
 
 def printProcessTree(pid, childDict, indent):
     for i in xrange(0, indent):
@@ -36,16 +39,84 @@ def processTree(syscallListByPid):
         printProcessTree(head, childDict, 0)
                 
 
+########################################
+fileStatList = {}
+fidStatList = {}
+def statFileIO(result):
+    global fidStatList
+    global fileStatList
+    if result["syscall"] in ["read", "write", "open", "close"]:
+        if result["return"] == -1:  # ignore failed syscalls
+            return
+        
+        if result["syscall"] == "open":
+            fid = result["return"]
+        else:
+            fid = result["args"][0]
 
-def parser(filename):
+        # file close
+        if result["syscall"] == "close":
+            if fid in fidStatList:
+                #print fidStatList[fid]
+                filename = fidStatList[fid][0]
+                if filename not in fileStatList:
+                    fileStatList[filename] = [1, fidStatList[fid][1], fidStatList[fid][2], fidStatList[fid][3], fidStatList[fid][4]]
+                else:
+                    fileStatList[filename][0] += 1
+                    for i in [1, 2, 3, 4]:
+                        fileStatList[filename][i] += fidStatList[fid][i]
+
+                del fidStatList[fid]
+                return
+
+        # if read/write/open
+        if fid not in fidStatList:
+            if result["syscall"] == "open":
+                # fidStatList[fid] = [filename, read count, read acc bytes, write count, write acc bytes]
+                fidStatList[fid] = [result["args"][0], 0, 0, 0, 0]
+            else:
+                fidStatList[fid] = ["unknown:"+fid, 0, 0, 0, 0]
+
+        # stat read/write
+        if result["syscall"] == "read":
+            fidStatList[fid][1] += 1
+            fidStatList[fid][2] += int(result["return"])
+        if result["syscall"] == "write":
+            fidStatList[fid][3] += 1
+            fidStatList[fid][4] += int(result["return"])
+        return
+
+def printFileIO():
+    global fidStatList
+    global fileStatList
+    for fid in fidStatList:
+        #print fidStatList[fid]
+        filename = fidStatList[fid][0]
+        if filename not in fileStatList:
+            fileStatList[filename] = [1, fidStatList[fid][1], fidStatList[fid][2], fidStatList[fid][3], fidStatList[fid][4]]
+        else:
+            fileStatList[filename][0] += 1
+            for i in [1, 2, 3, 4]:
+                fileStatList[filename][i] += fidStatList[fid][i]
+
+    for file in fileStatList:
+        print file, ",",
+        for item in fileStatList[file]:
+            print item, ",",
+        print
+
+########################################
+
+def straceParser(filename, havePid=0, haveTime=0, haveTimeSpent=0):
     syscallListByPid = {}
 
     unfinishedSyscallStack = {}
     f = open(filename, "r")
-    for line in f:
+    if not f:
+        logging.error("Cannot open file: " + filename)
+        return
 
-        havePid = 1
-        haveTime = 1
+    for line in f:
 
         if line.find("restart_syscall") != -1:      # TODO: ignore this first
             continue
@@ -74,29 +145,42 @@ def parser(filename):
 
 
         # Parse the line. The line should be a completed system call
-        result = parseLine(line, havePid, haveTime)
+        #print line
+        result = parseLine(line, havePid, haveTime, haveTimeSpent)
 
         # put into syscallListByPid
-        if result["pid"] not in syscallListByPid:
-            syscallListByPid[result["pid"]] = list()
-        syscallListByPid[result["pid"]].append(result)
+        #if result["pid"] not in syscallListByPid:
+        #    syscallListByPid[result["pid"]] = list()
+        #syscallListByPid[result["pid"]].append(result)
+
+        # hook here for every completed syscalls:
+        if result:
+            #print result
+            statFileIO(result)
         
         #print result
 
-    return syscallListByPid
+    # hook here for final:
+    printFileIO()
+
+    return 
 
 #
 #   parseLine
 #
-#   It parse a line and return a dict with the following:
-#   pid :       pid
-#   startTime : start time of the call
-#   syscall :   system call function
-#   args :      a list of arguments
-#   return :    return value
-#   (ignore)signalEvent : signal event (no syscall, args, return)
+#   It parse a complete line and return a dict with the following:
+#   pid :       pid (if havePid enabled)
+#   startTime : start time of the call (if haveTime enabled)
+#   syscall :   system call function 
+#   args :      a list of arguments ([] if no options)
+#   return :    return value (number or '?' (e.g. exit syscall))
+#   timeSpent : time spent in syscall (if haveTimeSpent enable. But even so, it may not exist in some case (e.g. exit syscall) )
 #
-def parseLine(line, havePid=0, haveTime=0):
+#   Return null if hit some error
+#
+#   (Not implemented) signalEvent : signal event (no syscall, args, return)
+#
+def parseLine(line, havePid=0, haveTime=0, haveTimeSpent=0):
     result = {}    
     remainLine = line
 
@@ -110,30 +194,37 @@ def parseLine(line, havePid=0, haveTime=0):
             result["startTime"] = m.group(1)
             remainLine = m.group(2)
 
-        #if remainLine.find("--- SIG") != -1:        # a signal line
-        #    result["signalEvent"] = remainLine
-        #    return result
+        if remainLine.find("--- SIG") != -1:        # a signal line
+            #result["signalEvent"] = remainLine
+            #return result
+            ### Ignore signal line now
+            return 
         
-        if remainLine.find("<unfinished ...>") == -1:
-            if remainLine.find("resumed>") == -1:
-                # normal system call
-                m = re.match(r"([^(]+)\((.*)\)[ ]+=[ ]+(.*)", remainLine)
-                result["syscall"] = m.group(1)
-                result["args"] = parseArgs(m.group(2).strip())
-                result["return"] = m.group(3)
-            else: # resume system call
-                m = re.match(r"(.*)\)[ ]+=[ ]+(.*)", remainLine)
-                result["args"] = m.group(1)
-                result["return"] = m.group(2)
+        ### assume no unfinished/resumed syscall, all are merged by caller
+        if remainLine.find("<unfinished ...>") != -1 or remainLine.find("resumed>") != -1:
+            return
 
-        else:   # unfinished system call
-            m = re.match(r"([^(]+)\((.*)<unfinished ...>$", remainLine)
-            result["syscall"] = m.group(1)
-            result["args"] = (m.group(2)).split(", ")
-            result["return"] = ""
+        # normal system call
+        m = re.match(r"([^(]+)\((.*)\)[ ]+=[ ]+([\d\-?]+)(.*)", remainLine)
+        result["syscall"] = m.group(1)
+        result["args"] = parseArgs(m.group(2).strip())
+        result["return"] = m.group(3)
+        remainLine = m.group(4)
+
+        if haveTimeSpent:
+            m = re.search(r"<([\d.]*)>", remainLine)
+            if m:
+                result["timespent"] = m.group(1)
+            else:
+                result["timespent"] = "unknown"
+
     except:
-        print "Error parsing this line: ", line
-        print sys.exc_info()
+        logging.warning("parseLine: Error parsing this line: " + line)
+        #print sys.exc_info()
+        #exctype, value, t = sys.exc_info()
+        #print traceback.print_exc()
+        #print sys.exc_info()
+        return 
         
     return result
 
@@ -152,15 +243,15 @@ def parseArgs(argString):
             while searchEndSymbolStartAt < len(argString):
                 endSymbolIndex = argString.find(endSymbol[argString[currIndex]], searchEndSymbolStartAt)
                 if endSymbolIndex == -1:
-                    print "parseArgs: strange, can't find end symbol in this arg:", argString
+                    logging.warning("parseArgs: strange, can't find end symbol in this arg:" + argString)
                     return []
-                if argString[endSymbolIndex-1] == '\\':  # escape char
-                    searchEndSymbolStartAt = endSymbolIndex+1
+                if argString[endSymbolIndex-1] == '\\' and (endSymbolIndex-2 >= 0 and argString[endSymbolIndex-2] != '\\'):  # escape char which are not escaped
+                    searchEndSymbolStartAt = endSymbolIndex + 1
                 else:
                     break
-            searchCommaStartAt = endSymbolIndex+1
+            searchCommaStartAt = endSymbolIndex + 1
         else:    # normal, search comma after currIndex
-            searchCommaStartAt = currIndex+1
+            searchCommaStartAt = currIndex + 1
 
         i = argString.find(',', searchCommaStartAt)
         if i == -1:
@@ -174,25 +265,21 @@ def parseArgs(argString):
 
 def main():
     # parse command line options
-    try:
-        opts, args = getopt.getopt(sys.argv[1:], "h", ["help"])
-    except getopt.error, msg:
-        print msg
-        print "for help use --help"
-        sys.exit(2)
-    # process options
-    for o, a in opts:
-        if o in ("-h", "--help"):
-            print __doc__
-            sys.exit(0)
-    # process arguments
-    #for arg in args:
-    #    process(arg) # process() is defined elsewhere
+    optionParser = OptionParser()
+    optionParser.add_option("-t", "--withtime", action="store_true", dest="withtime", help="have time in strace")
+    optionParser.add_option("-f", "--withfork", action="store_true", dest="withpid", help="have pid in strace")
+    optionParser.add_option("-T", "--withtimespent", action="store_true", dest="withtimespent", help="have time spent in strace")
 
-    syscallListByPid = parser("test/stardict.out")
+    (options, args) = optionParser.parse_args()
 
-    print syscallListByPid.keys()
-    processTree(syscallListByPid)
+    if len(args) < 1:
+        print "Filename is missing, exit."
+        return 1
+
+    straceParser(args[0], options.withpid, options.withtime, options.withtimespent)
+
+    #print syscallListByPid.keys()
+    #processTree(syscallListByPid)
 
 if __name__ == "__main__":
     main()
