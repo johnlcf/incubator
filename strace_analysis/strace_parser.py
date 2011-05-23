@@ -107,6 +107,23 @@ def printFileIO():
 
 ########################################
 
+def detectLineFormat(line):
+    havePid = 0
+    haveTime = 0
+    haveTimeSpent = 0
+
+    remainLine = line
+
+    m = re.match(r"(\d+)[ ]+(.*)", line)
+    if m:
+        havePid = 1
+        remainLine = m.group(2)
+
+
+
+    
+
+
 def straceParser(filename, havePid=0, haveTime=0, haveTimeSpent=0):
     syscallListByPid = {}
 
