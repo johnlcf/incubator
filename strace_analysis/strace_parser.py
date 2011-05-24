@@ -114,13 +114,37 @@ def detectLineFormat(line):
 
     remainLine = line
 
-    m = re.match(r"(\d+)[ ]+(.*)", line)
+    m = re.match(r"([0-9:. ]*)([a-z]+\(.*[ ]+=[ ]+[-0-9]+)(.*)", line)
     if m:
-        havePid = 1
-        remainLine = m.group(2)
+        pre = m.group(1)
+        mid = m.group(2)
+        post = m.group(3)
+    else:
+        logging.debug("detectLineFormat: Failed: unable to match the line, give up detection.")
+        return 
 
+    if pre != '':
+        if len(pre.strip().split()) > 2:
+            logging.debug("detectLineFormat: Failed: more the 2 parts in pre.")
+            return
+        if len(pre.strip().split()) == 2:
+            haveTime = 1
+            havePid = 1
+        else:
+            if ':' in pre or '.' in pre:
+                havePid = 0
+                haveTime = 1
+            else:
+                havePid = 1
+                haveTime = 0
 
-
+    if post != '':
+        if re.search(r"(<[0-9.]+>)", line):
+            haveTimeSpent = 1
+        else:
+            haveTimeSpent = 0
+        
+    return (havePid, haveTime, haveTimeSpent)
     
 
 
@@ -134,6 +158,7 @@ def straceParser(filename, havePid=0, haveTime=0, haveTimeSpent=0):
         return
 
     for line in f:
+        detectLineFormat(line)
 
         if line.find("restart_syscall") != -1:      # TODO: ignore this first
             continue
@@ -293,7 +318,23 @@ def main():
         print "Filename is missing, exit."
         return 1
 
-    straceParser(args[0], options.withpid, options.withtime, options.withtimespent)
+    if options.withpid or options.withtime or options.withtimespent:
+        havePid = options.withpid
+        haveTime = options.withtime
+        haveTimeSpent = options.withtimespent
+    else:
+        f = open(args[0])
+        lineFormat = detectLineFormat(f.readline())
+        if lineFormat:
+            havePid, haveTime, haveTimeSpent = lineFormat
+        else:
+            logging.warning("Auto detect line format failed. Suggest using -t,-f,-T to specify.")
+            havePid = 0
+            haveTime = 0
+            haveTimeSpent = 0
+        f.close()
+
+    straceParser(args[0], havePid, haveTime, haveTimeSpent)
 
     #print syscallListByPid.keys()
     #processTree(syscallListByPid)
